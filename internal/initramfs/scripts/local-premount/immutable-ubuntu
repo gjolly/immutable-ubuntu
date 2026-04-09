@@ -1,0 +1,49 @@
+#!/bin/sh
+# initramfs-tools local-premount script — sets up dm-verity before the root is mounted.
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+ROOTHASH=""
+ROOTDEV=""
+
+for x in $(cat /proc/cmdline); do
+    case "$x" in
+        roothash=*)   ROOTHASH="${x#roothash=}" ;;
+        root=PARTUUID=*) ROOTDEV="$(findfs "PARTUUID=${x#root=PARTUUID=}" 2>/dev/null)" ;;
+        root=/dev/*)  ROOTDEV="${x#root=}" ;;
+    esac
+done
+
+# Nothing to do if no root hash was specified.
+[ -n "$ROOTHASH" ] || exit 0
+
+if [ -z "$ROOTDEV" ]; then
+    panic "immutable-ubuntu: cannot determine root device from cmdline"
+fi
+
+# The verity hash partition is expected to follow the root partition by label.
+# Its path is passed via verityhashdev= on the kernel command line; fall back
+# to a device named by appending '-verity' to the root partition name.
+HASHDEV=""
+for x in $(cat /proc/cmdline); do
+    case "$x" in
+        verityhashdev=*) HASHDEV="${x#verityhashdev=}" ;;
+    esac
+done
+
+if [ -z "$HASHDEV" ]; then
+    panic "immutable-ubuntu: verityhashdev= not set on kernel command line"
+fi
+
+log_begin_msg "immutable-ubuntu: opening dm-verity root on $ROOTDEV"
+veritysetup open "$ROOTDEV" root "$HASHDEV" "$ROOTHASH"
+log_end_msg
+
+# Replace the root device with the mapped verity device.
+ROOT=/dev/mapper/root
