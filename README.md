@@ -14,7 +14,6 @@ To create an immutable Ubuntu image from an existing image that is mounted, run 
 
 ```bash
 immutable-ubuntu freeze \
-  --disk /path/to/mounted/disk \
   --config /path/to/image-metadata.yaml \
   --output /path/to/output.img
 ```

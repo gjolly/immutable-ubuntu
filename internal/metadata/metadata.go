@@ -30,7 +30,7 @@ func Collect(rootfs string) (ImageMetadata, error) {
 	if err != nil {
 		return m, fmt.Errorf("read cmdline: %w", err)
 	}
-	m.Cmdline = strings.TrimSpace(string(cmdline))
+	m.Cmdline = stripCmdlineArgs(strings.TrimSpace(string(cmdline)), "BOOT_IMAGE")
 
 	partUUIDs, err := lsblkPARTUUIDs(rootfs)
 	if err != nil {
@@ -91,6 +91,27 @@ func AppendVerity(m ImageMetadata, roothash string) string {
 		roothash, m.RootPARTUUID,
 	)
 	return strings.TrimSpace(m.Cmdline) + " " + extra
+}
+
+// stripCmdlineArgs removes all arguments whose key matches any of the given keys
+// from a space-separated kernel command line. Both bare keys ("key") and key=value
+// pairs ("key=value") are removed.
+func stripCmdlineArgs(cmdline string, keys ...string) string {
+	drop := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		drop[k] = true
+	}
+	var kept []string
+	for _, arg := range strings.Fields(cmdline) {
+		key := arg
+		if i := strings.IndexByte(arg, '='); i >= 0 {
+			key = arg[:i]
+		}
+		if !drop[key] {
+			kept = append(kept, arg)
+		}
+	}
+	return strings.Join(kept, " ")
 }
 
 // lsblkDevice mirrors the relevant fields from lsblk's JSON output.
