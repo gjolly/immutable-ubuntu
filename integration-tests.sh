@@ -9,6 +9,15 @@ LXD_VM_DIR="/var/snap/lxd/common/lxd/virtual-machines"
 OUTPUT_IMG="/tmp/${VM_NAME}-output.img"
 LOCAL_METADATA="/tmp/${VM_NAME}-metadata.yaml"
 LOOP_DEV=""
+KEEP_VM=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep-vm) KEEP_VM=1 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+    shift
+done
 
 cleanup() {
     if [ -n "$LOOP_DEV" ]; then
@@ -18,7 +27,11 @@ cleanup() {
     rm -f "$OUTPUT_IMG" "$LOCAL_METADATA"
     echo "Deleting VMs..."
     lxc delete --force "$VM_NAME" 2>/dev/null || true
-    lxc delete --force "$BOOT_VM_NAME" 2>/dev/null || true
+    if [ "$KEEP_VM" = "1" ]; then
+        echo "but keeping test VM for debugging: $BOOT_VM_NAME"
+    else
+        lxc delete --force "$BOOT_VM_NAME" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
