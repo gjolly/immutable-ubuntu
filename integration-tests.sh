@@ -15,7 +15,7 @@ cleanup() {
         echo "Detaching loop device $LOOP_DEV..."
         losetup -d "$LOOP_DEV" 2>/dev/null || true
     fi
-    rm -f "$LOCAL_METADATA"
+    rm -f "$OUTPUT_IMG" "$LOCAL_METADATA"
     echo "Deleting VMs..."
     lxc delete --force "$VM_NAME" 2>/dev/null || true
     lxc delete --force "$BOOT_VM_NAME" 2>/dev/null || true
@@ -96,7 +96,7 @@ LOOP_DEV=""
 
 # Create a new VM and replace its disk with the generated image before first boot.
 echo "Creating boot VM $BOOT_VM_NAME..."
-lxc init --vm ubuntu:24.04 "$BOOT_VM_NAME"
+lxc init --vm ubuntu:24.04 "$BOOT_VM_NAME" -c security.secureboot=false
 
 echo "Installing generated image as boot VM disk..."
 cp "$OUTPUT_IMG" "$LXD_VM_DIR/$BOOT_VM_NAME/root.img"
