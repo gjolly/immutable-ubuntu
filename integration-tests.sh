@@ -28,7 +28,7 @@ CGO_ENABLED=0 go build -o "$BINARY" .
 
 # Launch VM
 echo "Launching VM $VM_NAME..."
-lxc launch --vm ubuntu:24.04 "$VM_NAME"
+lxc launch --vm ubuntu:24.04 "$VM_NAME" --device root,size=5GiB
 
 echo "Waiting for LXD agent..."
 for i in $(seq 1 60); do

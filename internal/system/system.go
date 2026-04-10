@@ -73,6 +73,13 @@ func patchFstabLine(line string) string {
 	opts = addMountOption(opts, "x-systemd.verity")
 
 	fields[3] = opts
+
+	// Disable fsck for the verity root: the kernel verifies integrity via dm-verity,
+	// and fsck cannot open a read-only mapped device anyway (pass=0 skips it).
+	if len(fields) >= 6 {
+		fields[5] = "0"
+	}
+
 	return strings.Join(fields, "\t")
 }
 
