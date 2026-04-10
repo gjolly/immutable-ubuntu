@@ -15,7 +15,8 @@ To create an immutable Ubuntu image from an existing image that is mounted, run 
 ```bash
 immutable-ubuntu freeze \
   --config /path/to/image-metadata.yaml \
-  --output /path/to/output.img
+  --output /path/to/output.img \
+  [--volatile-dirs var,etc]
 ```
 
 ## High-Level Overview
@@ -25,13 +26,12 @@ immutable-ubuntu freeze \
    * Run `apt clean` to remove cached package files.
    * Remove log files from `/var/log` to free up space.
    * Set an empty /etc/machine-id to avoid issues with duplicate machine IDs when the image is cloned.
- * Install the necessary tools for creating an immutable image, such as `veritysetup`.
  * Configure `/etc/fstab` to mount the root filesystem with dm-verity as read-only,
  * Add an initramfs hook to parse the kernel command line and mount the root filesystem with dm-verity. This hook will be included in the initramfs when the image is created.
  * Regenerate the initramfs to include the new hook (with `initramfs-tools`).
  * Collect image metadata and write it to `/etc/immutable-ubuntu/image-metadata.yaml`:
    * Read the kernel command line from `/proc/cmdline`.
-   * Detect the PARTUUID for the root filesystem, EFI system partition, and boot partition (if present) by parsing `/etc/fstab`.
+   * Detect the PARTUUID for the root filesystem, EFI system partition, and boot partition (if present) using `lsblk`.
    * Record whether a dedicated `/boot` partition exists.
 
 On `freeze`, the tool performs the following steps:
@@ -40,15 +40,15 @@ On `freeze`, the tool performs the following steps:
  * Generate a UKI (Unified Kernel Image) that includes:
    * The kernel present on the boot partition (or in `/boot` on the root filesystem).
    * The initramfs present on the boot partition (or in `/boot` on the root filesystem).
-   * The kernel command line from `image-metadata.yaml`, with the verity root hash and root filesystem UUID appended, along with `systemd.volatile=overlay`.
+   * The kernel command line from `image-metadata.yaml`, with the verity root hash and root filesystem UUID appended, and optionally `immutable-ubuntu.overlay=<dirs>` if `--volatile-dirs` is specified.
  * Move the UKI in `/EFI/BOOT/BOOTX64.EFI` on the EFI system partition.
 
 ## Notes
 
  * `/run` and `/tmp` will be mounted as tmpfs by systemd.
- * `/var` will be managed via `systemd.volatile=overlay`: systemd sets up an overlayfs with the read-only `/var` from the rootfs as the lower layer, so existing content (e.g. `/var/lib/dpkg`) remains visible while writes go to a tmpfs upper layer.
+ * Writable overlays are opt-in: pass `--volatile-dirs var,etc` (or any comma-separated list) to `freeze` to make those directories writable at runtime. The initramfs `local-bottom` script sets up a tmpfs-backed overlayfs for each listed directory before `switch_root`, leaving the rest of the verity root truly read-only.
  * The `machine-id` file will be automatically bind-mounted from `/run` by systemd.
- * The rootfs passed to `freeze` must be an offline snapshot of the system on which `prepare` was run, since `freeze` relies on the initramfs hook and `/etc/immutable-ubuntu/cmdline` written by `prepare`.
+ * The rootfs passed to `freeze` must be an offline snapshot of the system on which `prepare` was run, since `freeze` relies on the initramfs hook and `/etc/immutable-ubuntu/image-metadata.yaml` written by `prepare`.
 
 ## AWS Attestable AMIs
 
@@ -77,10 +77,10 @@ automatically written to `<output>.pcr.json`:
 ```json
 {
   "Measurements": {
-    "HashAlgorithm": "SHA384",
-    "PCR4": "<Secure Boot Policy hash>",
-    "PCR7": "<Secure Boot Authority hash>",
-    "PCR12": "<Kernel Command Line hash>"
+    "HashAlgorithm": "SHA384 { ... }",
+    "PCR4": "PCR4_measurement",
+    "PCR7": "PCR7_measurement",
+    "PCR12": "PCR12_measurement"
   }
 }
 ```
