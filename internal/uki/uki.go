@@ -29,21 +29,30 @@ func Build(cfg UKIConfig) error {
 	return nil
 }
 
-// Install mounts the raw FAT32 ESP image, places the UKI at EFI/BOOT/BOOTX64.EFI, then unmounts.
-func Install(uki, espImage string) error {
+// InstallToDisk loop-mounts diskImage, mounts the ESP (partition 1), places the UKI at
+// EFI/BOOT/BOOTX64.EFI, then unmounts and detaches the loop device.
+func InstallToDisk(ukiPath, diskImage string) error {
+	out, err := runCmdOutput("losetup", "--find", "--partscan", "--show", diskImage)
+	if err != nil {
+		return fmt.Errorf("attach disk image: %w", err)
+	}
+	loopDev := strings.TrimSpace(string(out))
+	defer func() { _ = runCmd("losetup", "-d", loopDev) }()
+
+	// Give udev a moment to create partition device nodes.
+	_ = runCmd("udevadm", "settle", "--timeout=5")
+
 	mountDir, err := os.MkdirTemp("", "immutable-ubuntu-esp-*")
 	if err != nil {
 		return fmt.Errorf("create ESP mount dir: %w", err)
 	}
 	defer os.RemoveAll(mountDir)
 
-	if err := runCmd("mount", "-o", "loop", espImage, mountDir); err != nil {
-		return fmt.Errorf("mount ESP image: %w", err)
+	espDev := loopDev + "p1"
+	if err := runCmd("mount", espDev, mountDir); err != nil {
+		return fmt.Errorf("mount ESP: %w", err)
 	}
-	defer func() {
-		// Best-effort unmount; ignore error since we can't return it from defer.
-		_ = runCmd("umount", mountDir)
-	}()
+	defer func() { _ = runCmd("umount", mountDir) }()
 
 	efiDir := filepath.Join(mountDir, "EFI", "BOOT")
 	if err := os.MkdirAll(efiDir, 0755); err != nil {
@@ -51,7 +60,7 @@ func Install(uki, espImage string) error {
 	}
 
 	dest := filepath.Join(efiDir, "BOOTX64.EFI")
-	if err := runCmd("cp", uki, dest); err != nil {
+	if err := runCmd("cp", ukiPath, dest); err != nil {
 		return fmt.Errorf("copy UKI: %w", err)
 	}
 
@@ -67,7 +76,11 @@ func FindKernel(partitionImage, destDir string) (kernel, initramfs string, err e
 	}
 	defer os.RemoveAll(mountDir)
 
-	if err := runCmd("mount", "-o", "loop,ro", partitionImage, mountDir); err != nil {
+	mountOpts, err := mountOptions(partitionImage)
+	if err != nil {
+		return "", "", fmt.Errorf("stat partition source: %w", err)
+	}
+	if err := runCmd("mount", "-o", mountOpts, partitionImage, mountDir); err != nil {
 		return "", "", fmt.Errorf("mount partition image: %w", err)
 	}
 	defer func() { _ = runCmd("umount", mountDir) }()
@@ -124,4 +137,28 @@ func runCmd(name string, args ...string) error {
 		return fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
 	}
 	return nil
+}
+
+// runCmdOutput executes a command and returns stdout. On failure the error includes stderr.
+func runCmdOutput(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, stderr.String())
+	}
+	return out, nil
+}
+
+// mountOptions returns "-o ro" for block devices and "-o loop,ro" for image files.
+func mountOptions(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0 {
+		return "ro", nil
+	}
+	return "loop,ro", nil
 }

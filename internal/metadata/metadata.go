@@ -85,10 +85,11 @@ func Load(path string) (ImageMetadata, error) {
 }
 
 // AppendVerity builds the final kernel cmdline by appending dm-verity arguments.
-func AppendVerity(m ImageMetadata, roothash string) string {
+// verityPartUUID is the PARTUUID of the verity hash partition in the assembled image.
+func AppendVerity(m ImageMetadata, roothash, verityHashDevUUID, verityDataDevUUID string) string {
 	extra := fmt.Sprintf(
-		"root=/dev/mapper/root roothash=%s verityhashdev=PARTUUID=%s-verity ro",
-		roothash, m.RootPARTUUID,
+		"root=/dev/mapper/root roothash=%s root_hash_dev=PARTUUID=%s root_data_dev=PARTUUID=%s ro systemd.volatile=overlay",
+		roothash, verityHashDevUUID, verityDataDevUUID,
 	)
 	return strings.TrimSpace(m.Cmdline) + " " + extra
 }

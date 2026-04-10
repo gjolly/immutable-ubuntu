@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -67,47 +66,59 @@ func runFreeze(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Dump partitions to temp files.
-	espImg := filepath.Join(tmpDir, "esp.img")
-	fmt.Println("Dumping ESP partition...")
-	if err := dumpPartition(espDev, espImg); err != nil {
-		return fmt.Errorf("freeze: dump ESP: %w", err)
-	}
-
-	rootfsImg := filepath.Join(tmpDir, "rootfs.img")
-	fmt.Println("Dumping rootfs partition...")
-	if err := dumpPartition(rootDev, rootfsImg); err != nil {
-		return fmt.Errorf("freeze: dump rootfs: %w", err)
-	}
-
-	var bootImg string
-	if m.HasBootPartition {
-		bootImg = filepath.Join(tmpDir, "boot.img")
-		fmt.Println("Dumping boot partition...")
-		if err := dumpPartition(bootDev, bootImg); err != nil {
-			return fmt.Errorf("freeze: dump boot: %w", err)
-		}
-	}
-
-	// Compute dm-verity hash.
+	// Compute dm-verity hash directly from the rootfs block device.
 	verityImg := filepath.Join(tmpDir, "verity.img")
 	fmt.Println("Computing dm-verity hash...")
-	result, err := verity.ComputeHash(rootfsImg, verityImg)
+	result, err := verity.ComputeHash(rootDev, verityImg)
 	if err != nil {
 		return fmt.Errorf("freeze: verity: %w", err)
 	}
 	fmt.Printf("Root hash: %s\n", result.RootHash)
 
-	// Build final cmdline with verity args.
-	cmdline := metadata.AppendVerity(m, result.RootHash)
-
-	// Find kernel and initramfs from the boot/rootfs partition image.
-	fmt.Println("Locating kernel and initramfs...")
-	bootPartImg := rootfsImg
-	if m.HasBootPartition {
-		bootPartImg = bootImg
+	// Assemble the GPT image from block devices and the verity hash file.
+	partitions := []image.Partition{
+		{Label: "ESP", TypeCode: "ef00", Source: espDev},
 	}
-	kernel, initrd, err := uki.FindKernel(bootPartImg, tmpDir)
+	if m.HasBootPartition {
+		partitions = append(partitions, image.Partition{Label: "boot", TypeCode: "8300", Source: bootDev})
+	}
+	partitions = append(partitions,
+		image.Partition{Label: "rootfs", TypeCode: "8300", Source: rootDev},
+		image.Partition{Label: "verity", TypeCode: "8300", Source: verityImg},
+	)
+
+	fmt.Printf("Assembling output image at %s...\n", freezeOutput)
+	if err := image.Assemble(freezeOutput, partitions); err != nil {
+		return fmt.Errorf("freeze: image: %w", err)
+	}
+
+	// Read the PARTUUID that sgdisk assigned to the verity partition (always last).
+	verityHashNum := len(partitions)
+	fmt.Println("Querying verity partition GUID...")
+	verityHashUUID, err := image.GetPartitionGUID(freezeOutput, verityHashNum)
+	if err != nil {
+		return fmt.Errorf("freeze: get verity PARTUUID: %w", err)
+	}
+	fmt.Printf("Verity hash device PARTUUID: %s\n", verityHashUUID)
+
+	verityDataNum := len(partitions) - 1
+	fmt.Println("Querying verity partition GUID...")
+	verityDataUUID, err := image.GetPartitionGUID(freezeOutput, verityDataNum)
+	if err != nil {
+		return fmt.Errorf("freeze: get verity PARTUUID: %w", err)
+	}
+	fmt.Printf("Verity PARTUUID: %s\n", verityDataUUID)
+
+	// Build final cmdline with verity args.
+	cmdline := metadata.AppendVerity(m, result.RootHash, verityHashUUID, verityDataUUID)
+
+	// Find kernel and initramfs from the boot or rootfs block device.
+	fmt.Println("Locating kernel and initramfs...")
+	bootPartSrc := rootDev
+	if m.HasBootPartition {
+		bootPartSrc = bootDev
+	}
+	kernel, initrd, err := uki.FindKernel(bootPartSrc, tmpDir)
 	if err != nil {
 		return fmt.Errorf("freeze: find kernel: %w", err)
 	}
@@ -124,27 +135,10 @@ func runFreeze(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("freeze: uki build: %w", err)
 	}
 
-	// Install UKI into ESP partition image.
+	// Install UKI into the ESP of the assembled disk image.
 	fmt.Println("Installing UKI into ESP...")
-	if err := uki.Install(ukiPath, espImg); err != nil {
+	if err := uki.InstallToDisk(ukiPath, freezeOutput); err != nil {
 		return fmt.Errorf("freeze: uki install: %w", err)
-	}
-
-	// Assemble final GPT image.
-	partitions := []image.Partition{
-		{Label: "ESP", TypeCode: "ef00", Source: espImg},
-	}
-	if m.HasBootPartition {
-		partitions = append(partitions, image.Partition{Label: "boot", TypeCode: "8300", Source: bootImg})
-	}
-	partitions = append(partitions,
-		image.Partition{Label: "rootfs", TypeCode: "8300", Source: rootfsImg},
-		image.Partition{Label: "verity", TypeCode: "8300", Source: verityImg},
-	)
-
-	fmt.Printf("Assembling output image at %s...\n", freezeOutput)
-	if err := image.Assemble(freezeOutput, partitions); err != nil {
-		return fmt.Errorf("freeze: image: %w", err)
 	}
 
 	fmt.Println("freeze: done")
@@ -158,14 +152,4 @@ func partitionPath(partuuid string) (string, error) {
 		return "", fmt.Errorf("PARTUUID=%s: %w", partuuid, err)
 	}
 	return p, nil
-}
-
-// dumpPartition copies a block device to a file using cp --sparse=always.
-func dumpPartition(src, dest string) error {
-	cmd := exec.Command("cp", "--sparse=always", src, dest)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("cp --sparse=always %s %s: %w\n%s", src, dest, err, out)
-	}
-	return nil
 }

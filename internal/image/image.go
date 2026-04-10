@@ -13,7 +13,7 @@ import (
 type Partition struct {
 	Label    string // GPT partition name: "ESP", "boot", "rootfs", "verity"
 	TypeCode string // sgdisk hex type code: "ef00" (EFI System), "8300" (Linux)
-	Source   string // path to raw partition image file
+	Source   string // path to raw partition image file or block device
 }
 
 // Assemble creates a new GPT disk image at output containing the given partitions in order.
@@ -26,15 +26,15 @@ func Assemble(output string, partitions []Partition) error {
 		}
 	}()
 
-	// Compute partition sizes from source files.
+	// Compute partition sizes; handle both regular files and block devices.
 	sizeMiBs := make([]int64, len(partitions))
 	totalMiB := int64(2) // 2 MiB for GPT header + backup table
 	for i, p := range partitions {
-		info, err := os.Stat(p.Source)
+		sz, err := deviceSize(p.Source)
 		if err != nil {
-			return fmt.Errorf("stat partition %q source: %w", p.Label, err)
+			return fmt.Errorf("size of partition %q source: %w", p.Label, err)
 		}
-		mib := (info.Size() + (1<<20 - 1)) >> 20
+		mib := (sz + (1<<20 - 1)) >> 20
 		sizeMiBs[i] = mib
 		totalMiB += mib
 	}
@@ -85,6 +85,43 @@ func Assemble(output string, partitions []Partition) error {
 
 	success = true
 	return nil
+}
+
+// GetPartitionGUID returns the unique GUID of partition partNum (1-based) in image.
+func GetPartitionGUID(image string, partNum int) (string, error) {
+	out, err := runCmdOutput("sgdisk", fmt.Sprintf("--info=%d", partNum), image)
+	if err != nil {
+		return "", fmt.Errorf("sgdisk --info=%d: %w", partNum, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Partition unique GUID:") {
+			continue
+		}
+		// "Partition unique GUID: 550E8400-E29B-41D4-A716-446655440000"
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			return "", fmt.Errorf("unexpected sgdisk --info line: %q", line)
+		}
+		return strings.ToLower(fields[3]), nil
+	}
+	return "", fmt.Errorf("partition unique GUID not found for partition %d", partNum)
+}
+
+// deviceSize returns the byte size of path, which may be a regular file or a block device.
+func deviceSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0 {
+		out, err := runCmdOutput("blockdev", "--getsize64", path)
+		if err != nil {
+			return 0, fmt.Errorf("blockdev --getsize64: %w", err)
+		}
+		return strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	}
+	return info.Size(), nil
 }
 
 // parseSgdiskFirstSector extracts the first sector number from `sgdisk --info` output.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# initramfs-tools hook — copies veritysetup and dm-verity module into the initramfs.
+# initramfs-tools hook — copies veritysetup, findfs, and dm-verity module into the initramfs.
 
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
@@ -13,6 +13,14 @@ esac
 for bin in /sbin/veritysetup /usr/sbin/veritysetup; do
     if [ -x "$bin" ]; then
         copy_exec "$bin" /sbin/veritysetup
+        break
+    fi
+done
+
+# Copy findfs so the premount script can resolve PARTUUID= to a device node.
+for bin in /sbin/findfs /usr/sbin/findfs; do
+    if [ -x "$bin" ]; then
+        copy_exec "$bin" /sbin/findfs
         break
     fi
 done
