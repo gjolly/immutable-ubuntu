@@ -27,3 +27,6 @@ done
 
 # Ensure the dm-verity kernel module and its dependencies are present.
 manual_add_modules dm-verity
+
+# Ensure the overlay kernel module is present for the volatile overlay setup.
+manual_add_modules overlay

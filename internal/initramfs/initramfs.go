@@ -21,6 +21,9 @@ func InstallHook(rootfs string) error {
 	if err := installEmbedded(rootfs, "scripts/local-premount", filepath.Join("etc", "initramfs-tools", "scripts", "local-premount"), 0755); err != nil {
 		return fmt.Errorf("install premount script: %w", err)
 	}
+	if err := installEmbedded(rootfs, "scripts/local-bottom", filepath.Join("etc", "initramfs-tools", "scripts", "local-bottom"), 0755); err != nil {
+		return fmt.Errorf("install local-bottom script: %w", err)
+	}
 	return nil
 }
 

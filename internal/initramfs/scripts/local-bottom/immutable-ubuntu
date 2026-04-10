@@ -1,0 +1,48 @@
+#!/bin/sh
+# initramfs-tools local-bottom script — sets up a volatile overlay over the root
+# when systemd.volatile=overlay is present on the kernel command line.
+#
+# This runs after the root is mounted at $rootmnt but before switch_root, so we
+# can mount an overlayfs on top of the read-only verity root here. systemd's own
+# systemd-volatile-root.service only works inside a systemd-based initrd, which
+# Ubuntu's busybox initramfs is not, so we must do this ourselves.
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+# Check for systemd.volatile=overlay on the kernel command line.
+VOLATILE_OVERLAY=false
+for x in $(cat /proc/cmdline); do
+    [ "$x" = "systemd.volatile=overlay" ] && VOLATILE_OVERLAY=true
+done
+
+$VOLATILE_OVERLAY || exit 0
+
+log_begin_msg "immutable-ubuntu: setting up volatile overlay on root"
+
+# Create a tmpfs to back the overlay upper and work directories.
+# The overlay filesystem holds a kernel-level reference to this tmpfs mount, so
+# the tmpfs stays alive even after the initramfs is torn down by switch_root.
+mkdir -p /run/volatile-upper
+if ! mount -t tmpfs volatile-upper /run/volatile-upper; then
+    log_failure_msg "immutable-ubuntu: failed to mount tmpfs for volatile overlay"
+    exit 1
+fi
+mkdir -p /run/volatile-upper/upper /run/volatile-upper/work
+
+# Mount an overlayfs over the verity root, making it appear writable.
+# Writes go to the tmpfs upper layer; the verity root is the read-only lower layer.
+if ! mount -t overlay overlay \
+    -o "lowerdir=${rootmnt},upperdir=/run/volatile-upper/upper,workdir=/run/volatile-upper/work" \
+    "${rootmnt}"; then
+    log_failure_msg "immutable-ubuntu: failed to mount volatile overlay"
+    umount /run/volatile-upper
+    exit 1
+fi
+
+log_end_msg
