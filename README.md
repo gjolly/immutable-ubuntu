@@ -1,6 +1,25 @@
 # Immutable Ubuntu
 
-Build an immutable Ubuntu image with a dm-verity rootfs.
+`immutable-ubuntu` turns a running Ubuntu VM into a fully immutable, attestable disk image —
+no custom build tooling or image pipeline required.
+
+The workflow is simple: boot any Ubuntu VM, configure it exactly as you want using standard
+tools (`apt`, config files, whatever), then run `immutable-ubuntu prepare` followed by
+`immutable-ubuntu freeze`. The result is a GPT disk image where:
+
+- The root filesystem is protected by **dm-verity**: any modification to the rootfs is
+  detected at boot and causes the system to refuse to start.
+- The kernel, initramfs, and kernel command line (which embeds the dm-verity root hash) are
+  bundled into a **UKI (Unified Kernel Image)**. The UKI is the single artifact that ties
+  the boot process to a specific, unmodified rootfs.
+- When a TPM is present the UKI hash is measured into **TPM PCR4**, making the
+  entire system cryptographically attestable: a remote party can verify that an
+  instance is running exactly the image that was built, with no modification to
+  the rootfs, kernel, or boot parameters.
+
+This makes `immutable-ubuntu` well-suited for hardened workloads and environments that
+require supply-chain integrity, such as AWS EC2 instances registered as
+[attestable AMIs](docs/aws-attestable-ami.md).
 
 ## Usage
 
