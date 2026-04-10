@@ -7,6 +7,7 @@ BINARY="./immutable-ubuntu"
 METADATA_PATH="/etc/immutable-ubuntu/image-metadata.yaml"
 LXD_VM_DIR="/var/snap/lxd/common/lxd/virtual-machines"
 OUTPUT_IMG="/tmp/${VM_NAME}-output.img"
+OUTPUT_PCR="${OUTPUT_IMG}.pcr.json"
 LOCAL_METADATA="/tmp/${VM_NAME}-metadata.yaml"
 LOOP_DEV=""
 KEEP_VM=0
@@ -24,7 +25,7 @@ cleanup() {
         echo "Detaching loop device $LOOP_DEV..."
         losetup -d "$LOOP_DEV" 2>/dev/null || true
     fi
-    rm -f "$OUTPUT_IMG" "$LOCAL_METADATA"
+    rm -f "$OUTPUT_IMG" "$OUTPUT_PCR" "$LOCAL_METADATA"
     echo "Deleting VMs..."
     lxc delete --force "$VM_NAME" 2>/dev/null || true
     if [ "$KEEP_VM" = "1" ]; then
@@ -100,6 +101,14 @@ echo "Running freeze..."
 
 echo "Verifying output image partition table..."
 sgdisk -p "$OUTPUT_IMG"
+
+# Verify PCR measurements if nitro-tpm-pcr-compute was available during freeze.
+if command -v nitro-tpm-pcr-compute >/dev/null 2>&1; then
+    echo "Verifying PCR reference measurements file..."
+    [ -f "$OUTPUT_PCR" ] || fail "PCR measurements file not found: $OUTPUT_PCR"
+    echo "Expected PCR measurements:"
+    cat "$OUTPUT_PCR"
+fi
 
 # Detach the source loop device — no longer needed.
 losetup -d "$LOOP_DEV"

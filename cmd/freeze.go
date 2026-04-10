@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -146,6 +147,12 @@ func runFreeze(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("freeze: uki build: %w", err)
 	}
 
+	// Optionally compute TPM PCR reference measurements for AWS attestable AMIs.
+	pcrOutput := freezeOutput + ".pcr.json"
+	if err := runPCRCompute(ukiPath, pcrOutput); err != nil {
+		return fmt.Errorf("freeze: pcr compute: %w", err)
+	}
+
 	// Install UKI into the ESP of the assembled disk image.
 	fmt.Println("Installing UKI into ESP...")
 	if err := uki.InstallToDisk(ukiPath, freezeOutput); err != nil {
@@ -153,6 +160,28 @@ func runFreeze(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("freeze: done")
+	return nil
+}
+
+// runPCRCompute runs nitro-tpm-pcr-compute against the UKI if the tool is available in PATH,
+// writing the JSON output to pcrOutput. If the tool is not installed, the step is skipped.
+func runPCRCompute(ukiPath, pcrOutput string) error {
+	toolPath, err := exec.LookPath("nitro-tpm-pcr-compute")
+	if err != nil {
+		fmt.Println("nitro-tpm-pcr-compute not found in PATH, skipping PCR measurements")
+		return nil
+	}
+
+	fmt.Println("Computing TPM PCR reference measurements...")
+	out, err := exec.Command(toolPath, "--image", ukiPath).Output()
+	if err != nil {
+		return fmt.Errorf("nitro-tpm-pcr-compute: %w", err)
+	}
+
+	if err := os.WriteFile(pcrOutput, out, 0644); err != nil {
+		return fmt.Errorf("write PCR measurements: %w", err)
+	}
+	fmt.Printf("PCR reference measurements written to %s\n", pcrOutput)
 	return nil
 }
 
