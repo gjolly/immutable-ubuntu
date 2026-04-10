@@ -20,13 +20,15 @@ var freezeCmd = &cobra.Command{
 }
 
 var (
-	freezeConfig string
-	freezeOutput string
+	freezeConfig      string
+	freezeOutput      string
+	freezeVolatileDirs string
 )
 
 func init() {
 	freezeCmd.Flags().StringVar(&freezeConfig, "config", "", "path to image-metadata.yaml (required)")
 	freezeCmd.Flags().StringVar(&freezeOutput, "output", "", "path for output image file (required)")
+	freezeCmd.Flags().StringVar(&freezeVolatileDirs, "volatile-dirs", "", "comma-separated list of directories to make writable via tmpfs overlay (e.g. \"var,etc\")")
 	_ = freezeCmd.MarkFlagRequired("config")
 	_ = freezeCmd.MarkFlagRequired("output")
 	rootCmd.AddCommand(freezeCmd)
@@ -109,8 +111,17 @@ func runFreeze(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Verity PARTUUID: %s\n", verityDataUUID)
 
+	// Parse --volatile-dirs into a slice, dropping empty entries.
+	var volatileDirs []string
+	for _, d := range strings.Split(freezeVolatileDirs, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			volatileDirs = append(volatileDirs, d)
+		}
+	}
+
 	// Build final cmdline with verity args.
-	cmdline := metadata.AppendVerity(m, result.RootHash, verityHashUUID, verityDataUUID)
+	cmdline := metadata.AppendVerity(m, result.RootHash, verityHashUUID, verityDataUUID, volatileDirs)
 
 	// Find kernel and initramfs from the boot or rootfs block device.
 	fmt.Println("Locating kernel and initramfs...")

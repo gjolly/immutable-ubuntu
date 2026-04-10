@@ -80,7 +80,10 @@ udevadm settle --timeout=10
 
 # Run freeze.
 echo "Running freeze..."
-"$BINARY" freeze --config "$LOCAL_METADATA" --output "$OUTPUT_IMG"
+"$BINARY" freeze \
+  --config "$LOCAL_METADATA" \
+  --volatile-dirs var,etc \
+  --output "$OUTPUT_IMG"
 
 echo "Verifying output image partition table..."
 sgdisk -p "$OUTPUT_IMG"

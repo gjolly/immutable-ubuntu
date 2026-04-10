@@ -1,11 +1,13 @@
 #!/bin/sh
-# initramfs-tools local-bottom script — sets up a volatile overlay over the root
-# when systemd.volatile=overlay is present on the kernel command line.
+# initramfs-tools local-bottom script — mounts per-directory writable overlays when
+# immutable-ubuntu.overlay=<dirs> is present on the kernel command line.
 #
-# This runs after the root is mounted at $rootmnt but before switch_root, so we
-# can mount an overlayfs on top of the read-only verity root here. systemd's own
-# systemd-volatile-root.service only works inside a systemd-based initrd, which
-# Ubuntu's busybox initramfs is not, so we must do this ourselves.
+# This runs after the root is mounted at $rootmnt but before switch_root.
+# Each listed directory (e.g. "var,etc") gets its own overlayfs mount backed by a
+# shared tmpfs, leaving the rest of the verity root truly read-only.
+#
+# systemd's systemd-volatile-root.service only works inside a systemd-based initrd,
+# which Ubuntu's busybox initramfs is not, so we handle this ourselves.
 
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
@@ -15,34 +17,38 @@ esac
 
 . /scripts/functions
 
-# Check for systemd.volatile=overlay on the kernel command line.
-VOLATILE_OVERLAY=false
+# Parse immutable-ubuntu.overlay=var,etc from the kernel command line.
+OVERLAY_DIRS=""
 for x in $(cat /proc/cmdline); do
-    [ "$x" = "systemd.volatile=overlay" ] && VOLATILE_OVERLAY=true
+    case "$x" in
+        immutable-ubuntu.overlay=*) OVERLAY_DIRS="${x#immutable-ubuntu.overlay=}" ;;
+    esac
 done
 
-$VOLATILE_OVERLAY || exit 0
+[ -n "$OVERLAY_DIRS" ] || exit 0
 
-log_begin_msg "immutable-ubuntu: setting up volatile overlay on root"
+log_begin_msg "immutable-ubuntu: setting up volatile overlay(s) on root"
 
-# Create a tmpfs to back the overlay upper and work directories.
-# The overlay filesystem holds a kernel-level reference to this tmpfs mount, so
-# the tmpfs stays alive even after the initramfs is torn down by switch_root.
+# Create a single tmpfs to back all overlay upper and work directories.
+# The overlay filesystem holds kernel-level references to this tmpfs, so it stays
+# alive even after the initramfs is torn down by switch_root.
 mkdir -p /run/volatile-upper
 if ! mount -t tmpfs volatile-upper /run/volatile-upper; then
     log_failure_msg "immutable-ubuntu: failed to mount tmpfs for volatile overlay"
     exit 1
 fi
-mkdir -p /run/volatile-upper/upper /run/volatile-upper/work
 
-# Mount an overlayfs over the verity root, making it appear writable.
-# Writes go to the tmpfs upper layer; the verity root is the read-only lower layer.
-if ! mount -t overlay overlay \
-    -o "lowerdir=${rootmnt},upperdir=/run/volatile-upper/upper,workdir=/run/volatile-upper/work" \
-    "${rootmnt}"; then
-    log_failure_msg "immutable-ubuntu: failed to mount volatile overlay"
-    umount /run/volatile-upper
-    exit 1
-fi
+# Mount a per-directory overlay for each directory in the comma-separated list.
+IFS=','
+for dir in $OVERLAY_DIRS; do
+    mkdir -p "/run/volatile-upper/upper/${dir}" "/run/volatile-upper/work/${dir}"
+    if ! mount -t overlay overlay \
+        -o "lowerdir=${rootmnt}/${dir},upperdir=/run/volatile-upper/upper/${dir},workdir=/run/volatile-upper/work/${dir}" \
+        "${rootmnt}/${dir}"; then
+        log_failure_msg "immutable-ubuntu: failed to mount volatile overlay on /${dir}"
+        umount /run/volatile-upper
+        exit 1
+    fi
+done
 
 log_end_msg

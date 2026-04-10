@@ -86,11 +86,16 @@ func Load(path string) (ImageMetadata, error) {
 
 // AppendVerity builds the final kernel cmdline by appending dm-verity arguments.
 // verityPartUUID is the PARTUUID of the verity hash partition in the assembled image.
-func AppendVerity(m ImageMetadata, roothash, verityHashDevUUID, verityDataDevUUID string) string {
+// volatileDirs, if non-empty, adds an immutable-ubuntu.overlay=<dirs> parameter that
+// instructs the initramfs to mount per-directory writable overlays over those paths.
+func AppendVerity(m ImageMetadata, roothash, verityHashDevUUID, verityDataDevUUID string, volatileDirs []string) string {
 	extra := fmt.Sprintf(
-		"root=/dev/mapper/root roothash=%s root_hash_dev=PARTUUID=%s root_data_dev=PARTUUID=%s ro systemd.volatile=overlay",
+		"root=/dev/mapper/root roothash=%s root_hash_dev=PARTUUID=%s root_data_dev=PARTUUID=%s ro",
 		roothash, verityHashDevUUID, verityDataDevUUID,
 	)
+	if len(volatileDirs) > 0 {
+		extra += " immutable-ubuntu.overlay=" + strings.Join(volatileDirs, ",")
+	}
 	return strings.TrimSpace(m.Cmdline) + " " + extra
 }
 
