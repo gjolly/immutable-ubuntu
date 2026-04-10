@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+UBUNTU_RELEASE="24.04"
 VM_NAME="immutable-ubuntu-test-$$"
 BOOT_VM_NAME="immutable-ubuntu-boot-$$"
 BINARY="./immutable-ubuntu"
@@ -14,7 +15,13 @@ KEEP_VM=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --keep-vm) KEEP_VM=1 ;;
+        --keep-vm)
+          KEEP_VM=1
+          ;;
+        --release)
+          UBUNTU_RELEASE="$2"
+          shift
+          ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
     shift
@@ -42,7 +49,7 @@ CGO_ENABLED=0 go build -o "$BINARY" .
 
 # Launch VM
 echo "Launching VM $VM_NAME..."
-lxc launch --vm ubuntu:24.04 "$VM_NAME" --device root,size=5GiB
+lxc launch --vm ubuntu:"$UBUNTU_RELEASE" "$VM_NAME" --device root,size=5GiB
 
 echo "Waiting for LXD agent..."
 for i in $(seq 1 60); do
@@ -118,7 +125,7 @@ LOOP_DEV=""
 
 # Create a new VM and replace its disk with the generated image before first boot.
 echo "Creating boot VM $BOOT_VM_NAME..."
-lxc init --vm ubuntu:24.04 "$BOOT_VM_NAME" -c security.secureboot=false
+lxc init --vm ubuntu:"$UBUNTU_RELEASE" "$BOOT_VM_NAME" -c security.secureboot=false
 
 echo "Installing generated image as boot VM disk..."
 cp "$OUTPUT_IMG" "$LXD_VM_DIR/$BOOT_VM_NAME/root.img"
