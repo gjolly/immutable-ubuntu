@@ -13,7 +13,7 @@ attestable AMI.
 
 - An EC2 instance running Ubuntu (the "source VM") with `immutable-ubuntu` installed
 - A second EC2 instance (the "build host") with `immutable-ubuntu` and `nitro-tpm-pcr-compute`
-  installed
+  installed along with `systemd-boot-efi` and `systemd-ukify` (for UKI generation)
 - AWS CLI configured with permissions to: `ec2:CreateSnapshot`, `ec2:ImportSnapshot`,
   `ec2:RegisterImage`, `ec2:DescribeImportSnapshotTasks`, `s3:PutObject`
 - An S3 bucket for staging the disk image
@@ -163,6 +163,7 @@ AMI_ID=$(aws ec2 register-image \
   --architecture x86_64 \
   --boot-mode uefi \
   --tpm-support v2.0 \
+  --ena-support \
   --root-device-name /dev/sda1 \
   --block-device-mappings "DeviceName=/dev/sda1,Ebs={SnapshotId=${AMI_SNAPSHOT},VolumeType=gp3}" \
   --query 'ImageId' --output text)
@@ -208,6 +209,66 @@ there is no external command line to measure.
 
 See the [AWS documentation on PCR compute](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/create-pcr-compute.html)
 for details on how to build attestation policies around these values.
+
+## Step 9 — Verify the attestation document
+
+> **Note:** `nitro-tpm-attest` currently fails on burstable instance types (e.g. `t3.micro`)
+> due to a hardcoded NV buffer size that exceeds the TPM limit on those instances. Use a
+> non-burstable instance type such as `m5.large` or `c5.large` for attestation. See
+> [aws/NitroTPM-Tools#7](https://github.com/aws/NitroTPM-Tools/issues/7) for details.
+
+After retrieving an attestation document from a running instance with `nitro-tpm-attest`, decode
+it and compare the PCR values against the reference measurements stored in S3.
+
+The attestation document is CBOR+COSE encoded. Use the following Python script to extract the
+PCR values:
+
+```python
+# /// script
+# dependencies = ["cbor2"]
+# ///
+import cbor2, sys, json
+
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+
+# Decode COSE_Sign1 outer wrapper, attestation document is the 3rd element
+doc = cbor2.loads(cbor2.loads(data)[2])
+actual_pcrs = {idx: val.hex() for idx, val in doc["nitrotpm_pcrs"].items()}
+
+with open(sys.argv[2], "r") as f:
+    reference = json.load(f)
+
+# Reference keys are like "PCR4", values are hex strings
+reference_pcrs = {
+    int(k[3:]): v
+    for k, v in reference["Measurements"].items()
+    if k.startswith("PCR")
+}
+
+ok = True
+for idx, expected in sorted(reference_pcrs.items()):
+    actual = actual_pcrs.get(idx, "<missing>")
+    match = actual == expected
+    status = "OK" if match else "MISMATCH"
+    print(f"PCR{idx}: {status}")
+    if not match:
+        print(f"  expected: {expected}")
+        print(f"  actual:   {actual}")
+        ok = False
+
+sys.exit(0 if ok else 1)
+```
+
+Fetch the reference measurements and run the verification with [uv](https://docs.astral.sh/uv/):
+
+```bash
+aws s3 cp "s3://${BUCKET}/immutable-ubuntu/${AMI_ID}.pcr.json" /tmp/reference.pcr.json
+uv run decode-attestation.py attestation.bin /tmp/reference.pcr.json
+```
+
+**PCR4 must match** the value in the reference file. Any difference means the UKI (and therefore
+the dm-verity root hash) has changed since the image was built.
 
 ## Cleanup
 
