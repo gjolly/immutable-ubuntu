@@ -198,4 +198,20 @@ if $CLI exec "$BOOT_VM_NAME" -- sh -c 'echo test > /immutable-write-test' 2>/dev
     fail "write to rootfs succeeded but should have been rejected"
 fi
 
+# Verify /var and /etc are writable via overlayfs.
+echo "Verifying /var is writable..."
+$CLI exec "$BOOT_VM_NAME" -- sh -c 'touch /var/overlay-write-test && rm /var/overlay-write-test' \
+    || fail "/var is not writable"
+
+echo "Verifying /etc is writable..."
+$CLI exec "$BOOT_VM_NAME" -- sh -c 'touch /etc/overlay-write-test && rm /etc/overlay-write-test' \
+    || fail "/etc is not writable"
+
+# Verify /tmp is mounted as tmpfs.
+echo "Verifying /tmp is tmpfs..."
+TMP_FSTYPE=$($CLI exec "$BOOT_VM_NAME" -- findmnt --noheadings -o FSTYPE /tmp)
+echo "  /tmp fstype: $TMP_FSTYPE"
+echo "$TMP_FSTYPE" | grep -q "tmpfs" \
+    || fail "/tmp is not mounted as tmpfs (got: $TMP_FSTYPE)"
+
 echo "PASS"

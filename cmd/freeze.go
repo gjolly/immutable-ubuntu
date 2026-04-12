@@ -21,8 +21,8 @@ var freezeCmd = &cobra.Command{
 }
 
 var (
-	freezeConfig      string
-	freezeOutput      string
+	freezeConfig       string
+	freezeOutput       string
 	freezeVolatileDirs string
 )
 

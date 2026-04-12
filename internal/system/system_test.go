@@ -1,6 +1,9 @@
 package system
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +52,41 @@ func TestPatchFstabLine(t *testing.T) {
 				t.Errorf("patchFstabLine(%q)\n got  %q\n want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConfigureFstab_AddsTmpTmpfs(t *testing.T) {
+	dir := t.TempDir()
+	fstab := filepath.Join(dir, "etc", "fstab")
+	os.MkdirAll(filepath.Dir(fstab), 0755)
+
+	content := "UUID=abc123\t/\text4\tdefaults\t0\t1\n"
+	os.WriteFile(fstab, []byte(content), 0644)
+
+	if err := ConfigureFstab(dir); err != nil {
+		t.Fatalf("ConfigureFstab: %v", err)
+	}
+
+	data, _ := os.ReadFile(fstab)
+	if !strings.Contains(string(data), "tmpfs\t/tmp\ttmpfs") {
+		t.Error("expected /tmp tmpfs entry in fstab")
+	}
+}
+
+func TestConfigureFstab_DoesNotDuplicateTmpTmpfs(t *testing.T) {
+	dir := t.TempDir()
+	fstab := filepath.Join(dir, "etc", "fstab")
+	os.MkdirAll(filepath.Dir(fstab), 0755)
+
+	content := "UUID=abc123\t/\text4\tdefaults\t0\t1\ntmpfs\t/tmp\ttmpfs\tdefaults\t0\t0\n"
+	os.WriteFile(fstab, []byte(content), 0644)
+
+	if err := ConfigureFstab(dir); err != nil {
+		t.Fatalf("ConfigureFstab: %v", err)
+	}
+
+	data, _ := os.ReadFile(fstab)
+	if strings.Count(string(data), "/tmp") != 1 {
+		t.Error("expected exactly one /tmp entry in fstab")
 	}
 }

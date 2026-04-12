@@ -122,9 +122,9 @@ func stripCmdlineArgs(cmdline string, keys ...string) string {
 
 // lsblkDevice mirrors the relevant fields from lsblk's JSON output.
 type lsblkDevice struct {
-	Mountpoints []interface{}  `json:"mountpoints"`
-	PARTUUID    *string        `json:"partuuid"`
-	Children    []lsblkDevice  `json:"children"`
+	Mountpoints []interface{} `json:"mountpoints"`
+	PARTUUID    *string       `json:"partuuid"`
+	Children    []lsblkDevice `json:"children"`
 }
 
 type lsblkOutput struct {

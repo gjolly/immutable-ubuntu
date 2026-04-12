@@ -72,12 +72,34 @@ func ConfigureFstab(rootfs string) error {
 		updated = append(updated, patchFstabLine(line))
 	}
 
+	// Ensure /tmp is always mounted as tmpfs. On some Ubuntu configurations
+	// /tmp may be on disk or managed by systemd-tmpfiles instead of being a
+	// proper tmpfs mount. An explicit fstab entry guarantees it.
+	if !hasTmpMount(updated) {
+		updated = append(updated, "tmpfs\t/tmp\ttmpfs\tnosuid,nodev\t0\t0")
+	}
+
 	out := strings.Join(updated, "\n")
 	if err := os.WriteFile(fstabPath, []byte(out), 0644); err != nil {
 		return fmt.Errorf("write fstab: %w", err)
 	}
 
 	return nil
+}
+
+// hasTmpMount returns true if any non-comment line in the fstab mounts /tmp.
+func hasTmpMount(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := splitFstabFields(line)
+		if len(fields) >= 2 && fields[1] == "/tmp" {
+			return true
+		}
+	}
+	return false
 }
 
 // patchFstabLine adds ro and x-systemd.verity to the options of the root (/) mount entry.
