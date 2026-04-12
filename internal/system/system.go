@@ -9,6 +9,34 @@ import (
 	"strings"
 )
 
+// requiredPackages lists packages that must be installed in the rootfs
+// before regenerating the initramfs. veritysetup (from cryptsetup-bin) is
+// needed by the initramfs hook to set up dm-verity at boot.
+var requiredPackages = []string{"cryptsetup-bin"}
+
+// EnsureDeps installs required packages in the rootfs if they are not already present.
+func EnsureDeps(rootfs string) error {
+	// Check which packages are missing.
+	var missing []string
+	for _, pkg := range requiredPackages {
+		if err := runInChroot(rootfs, "dpkg", "-s", pkg); err != nil {
+			missing = append(missing, pkg)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	if err := runInChroot(rootfs, "apt-get", "update", "-q"); err != nil {
+		return fmt.Errorf("apt-get update: %w", err)
+	}
+	args := append([]string{"install", "-y", "--no-install-recommends"}, missing...)
+	if err := runInChroot(rootfs, "apt-get", args...); err != nil {
+		return fmt.Errorf("apt-get install %v: %w", missing, err)
+	}
+	return nil
+}
+
 // Cleanup removes cached packages, log files, and empties the machine-id.
 func Cleanup(rootfs string) error {
 	if err := runInChroot(rootfs, "apt-get", "clean"); err != nil {

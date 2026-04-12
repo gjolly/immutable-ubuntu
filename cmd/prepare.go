@@ -34,6 +34,11 @@ func runPrepare(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("prepare: fstab: %w", err)
 	}
 
+	fmt.Println("Ensuring required packages are installed...")
+	if err := system.EnsureDeps(rootfs); err != nil {
+		return fmt.Errorf("prepare: ensure deps: %w", err)
+	}
+
 	fmt.Println("Installing initramfs hook...")
 	if err := initramfs.InstallHook(rootfs); err != nil {
 		return fmt.Errorf("prepare: initramfs hook: %w", err)
