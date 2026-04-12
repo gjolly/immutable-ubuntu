@@ -183,6 +183,14 @@ done
 $CLI exec "$BOOT_VM_NAME" -- true 2>/dev/null \
     || fail "boot VM agent did not become ready"
 
+# Verify the system reaches a healthy steady state within 30 seconds.
+echo "Waiting for system to finish booting (max 30s)..."
+SYSTEM_STATE=$(timeout 30 $CLI exec "$BOOT_VM_NAME" -- systemctl is-system-running --wait 2>&1) \
+    || fail "system did not reach running state within 30s (got: $SYSTEM_STATE)"
+echo "  system state: $SYSTEM_STATE"
+[ "$SYSTEM_STATE" = "running" ] \
+    || fail "system is not running (got: $SYSTEM_STATE)"
+
 # Verify dm-verity device is present and in verified state.
 echo "Verifying dm-verity..."
 VERITY_STATUS=$($CLI exec "$BOOT_VM_NAME" -- dmsetup status root 2>&1)

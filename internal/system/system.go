@@ -10,35 +10,57 @@ import (
 )
 
 // requiredPackages lists packages that must be installed in the rootfs
-// before regenerating the initramfs. veritysetup (from cryptsetup-bin) is
-// needed by the initramfs hook to set up dm-verity at boot.
-var requiredPackages = []string{"cryptsetup-bin"}
+// before regenerating the initramfs. Glob patterns (e.g. "libtss2-esys*")
+// are supported and resolved by apt-get, which makes them work across
+// Ubuntu releases where soname suffixes change.
+var requiredPackages = []string{
+	// veritysetup is needed by the initramfs hook to set up dm-verity at boot.
+	"cryptsetup-bin",
+	// The systemd TPM2 libraries (libtss2-esys, libtss2-tcti-device, etc.)
+	// are only a Suggests of the systemd package, not a hard dependency.
+	// systemd loads them at runtime via dlopen. Minimal cloud images don't
+	// install Suggests, so systemd-tpm2-setup.service fails with
+	// "Operation not supported" when a TPM is present. libtss2-esys pulls
+	// in the rest of the tss2 stack (tcti-device, mu, sys, rc).
+	"libtss2-esys*",
+	"libtss2-rc*",
+}
 
 // EnsureDeps installs required packages in the rootfs if they are not already present.
 func EnsureDeps(rootfs string) error {
-	// Check which packages are missing.
-	var missing []string
-	for _, pkg := range requiredPackages {
-		if err := runInChroot(rootfs, "dpkg", "-s", pkg); err != nil {
-			missing = append(missing, pkg)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-
 	if err := runInChroot(rootfs, "apt-get", "update", "-q"); err != nil {
 		return fmt.Errorf("apt-get update: %w", err)
 	}
-	args := append([]string{"install", "-y", "--no-install-recommends"}, missing...)
+	args := append([]string{"install", "-y", "--no-install-recommends"}, requiredPackages...)
 	if err := runInChroot(rootfs, "apt-get", args...); err != nil {
-		return fmt.Errorf("apt-get install %v: %w", missing, err)
+		return fmt.Errorf("apt-get install %v: %w", requiredPackages, err)
+	}
+	return nil
+}
+
+// removeBootloader purges GRUB and shim packages that are unnecessary in a
+// UKI-based boot and whose leftover systemd units cause a degraded state.
+// Glob patterns are used so the list is architecture-independent.
+var removePackages = []string{
+	"grub*",
+	"shim*",
+}
+
+func removeBootloader(rootfs string) error {
+	fmt.Printf("Removing bootloader packages: %v\n", removePackages)
+	args := append([]string{"purge", "-y", "--allow-remove-essential"}, removePackages...)
+	if err := runInChroot(rootfs, "apt-get", args...); err != nil {
+		return fmt.Errorf("apt-get purge %v: %w", removePackages, err)
 	}
 	return nil
 }
 
 // Cleanup removes cached packages, log files, and empties the machine-id.
 func Cleanup(rootfs string) error {
+	if err := removeBootloader(rootfs); err != nil {
+		return fmt.Errorf("remove bootloader: %w", err)
+	}
+
 	if err := runInChroot(rootfs, "apt-get", "clean"); err != nil {
 		return fmt.Errorf("apt clean: %w", err)
 	}

@@ -90,7 +90,15 @@ func Load(path string) (ImageMetadata, error) {
 // instructs the initramfs to mount per-directory writable overlays over those paths.
 func AppendVerity(m ImageMetadata, roothash, verityHashDevUUID, verityDataDevUUID string, volatileDirs []string) string {
 	extra := fmt.Sprintf(
-		"root=/dev/mapper/root roothash=%s root_hash_dev=PARTUUID=%s root_data_dev=PARTUUID=%s ro",
+		// systemd.verity=no prevents systemd-veritysetup-generator from creating
+		// a systemd-veritysetup@root.service unit that tries to set up dm-verity
+		// in userspace. Without this, systemd waits ~90s for the verity partitions
+		// (by PARTUUID) to appear as block devices, which never happens because
+		// the initramfs has already assembled dm-verity before systemd starts.
+		// We can't use systemd's native verity support because Ubuntu prior to
+		// 26.04 ships with initramfs-tools by default, not a dracut/systemd-based
+		// initramfs.
+		"root=/dev/mapper/root roothash=%s root_hash_dev=PARTUUID=%s root_data_dev=PARTUUID=%s systemd.verity=no ro",
 		roothash, verityHashDevUUID, verityDataDevUUID,
 	)
 	if len(volatileDirs) > 0 {
