@@ -160,6 +160,13 @@ LOOP_DEV=""
 # Create a new VM and replace its disk with the generated image before first boot.
 echo "Creating boot VM $BOOT_VM_NAME..."
 $CLI init --vm "$(image_source)" "$BOOT_VM_NAME" -c security.secureboot=false
+if $CLI config device add "$BOOT_VM_NAME" vtpm tpm 2>/dev/null; then
+    HAS_TPM=1
+    echo "TPM device added to boot VM"
+else
+    HAS_TPM=0
+    echo "WARNING: could not add TPM device (swtpm may not be installed), skipping TPM verification"
+fi
 
 echo "Installing generated image as boot VM disk..."
 BOOT_DISK_IMG=$(find_vm_disk "$BOOT_VM_NAME")
@@ -213,5 +220,25 @@ TMP_FSTYPE=$($CLI exec "$BOOT_VM_NAME" -- findmnt --noheadings -o FSTYPE /tmp)
 echo "  /tmp fstype: $TMP_FSTYPE"
 echo "$TMP_FSTYPE" | grep -q "tmpfs" \
     || fail "/tmp is not mounted as tmpfs (got: $TMP_FSTYPE)"
+
+# Verify TPM PCR4 matches the pre-computed reference value.
+if [ "$HAS_TPM" = "1" ] && [ -f "$OUTPUT_PCR" ]; then
+    echo "Verifying TPM PCR4..."
+    if $CLI exec "$BOOT_VM_NAME" -- test -e /dev/tpm0 2>/dev/null; then
+        EXPECTED_PCR4=$(python3 -c "import json,sys; print(json.load(sys.stdin)['Measurements']['PCR4'])" < "$OUTPUT_PCR")
+        ACTUAL_PCR4=$($CLI exec "$BOOT_VM_NAME" -- cat /sys/class/tpm/tpm0/pcr-sha384/4 2>/dev/null) \
+            || ACTUAL_PCR4=""
+        ACTUAL_PCR4=$(echo "$ACTUAL_PCR4" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        EXPECTED_PCR4=$(echo "$EXPECTED_PCR4" | tr '[:upper:]' '[:lower:]')
+        echo "  expected: $EXPECTED_PCR4"
+        echo "  actual:   $ACTUAL_PCR4"
+        [ "$ACTUAL_PCR4" = "$EXPECTED_PCR4" ] \
+            || fail "PCR4 mismatch"
+    else
+        echo "WARNING: TPM device was added but /dev/tpm0 not found inside VM"
+    fi
+elif [ "$HAS_TPM" = "1" ]; then
+    echo "WARNING: TPM present but no PCR reference file ($OUTPUT_PCR), skipping PCR verification"
+fi
 
 echo "PASS"
