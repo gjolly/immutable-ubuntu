@@ -28,7 +28,7 @@ internal/
   uki/             # ukify wrapper, kernel/initrd finder
   verity/          # veritysetup wrapper
 main.go
-integration-tests.sh   # End-to-end test using LXD VMs
+integration-tests.sh   # End-to-end test using LXD or Incus VMs
 ```
 
 ## Build and test
@@ -40,7 +40,7 @@ go build ./...
 # Unit tests (image and verity packages only — others require root/hardware)
 go test ./...
 
-# Integration test (requires LXD, root, and sgdisk/ukify/veritysetup on PATH)
+# Integration test (requires LXD or Incus, root, and sgdisk/ukify/veritysetup on PATH)
 sudo bash integration-tests.sh
 ```
 
