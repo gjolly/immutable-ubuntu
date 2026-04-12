@@ -53,6 +53,11 @@ func Cleanup(rootfs string) error {
 		return fmt.Errorf("clear machine-id: %w", err)
 	}
 
+	randomSeed := filepath.Join(rootfs, "var", "lib", "systemd", "random-seed")
+	if err := os.Remove(randomSeed); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove random-seed: %w", err)
+	}
+
 	return nil
 }
 
