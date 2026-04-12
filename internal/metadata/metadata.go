@@ -30,7 +30,7 @@ func Collect(rootfs string) (ImageMetadata, error) {
 	if err != nil {
 		return m, fmt.Errorf("read cmdline: %w", err)
 	}
-	m.Cmdline = stripCmdlineArgs(strings.TrimSpace(string(cmdline)), "BOOT_IMAGE")
+	m.Cmdline = stripCmdlineArgs(strings.TrimSpace(string(cmdline)), "BOOT_IMAGE", "root", "ro", "rw")
 
 	partUUIDs, err := lsblkPARTUUIDs(rootfs)
 	if err != nil {
