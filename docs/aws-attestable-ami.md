@@ -14,7 +14,8 @@ attestable AMI.
 - An EC2 instance running Ubuntu (the "source VM") with `immutable-ubuntu` installed
 - A second EC2 instance (the "build host") with `immutable-ubuntu` and `nitro-tpm-pcr-compute`
   installed along with `systemd-boot-efi` and `systemd-ukify` (for UKI generation)
-- AWS CLI configured with permissions to: `ec2:CreateSnapshot`, `ec2:ImportSnapshot`,
+- AWS CLI configured with permissions to: `ec2:StopInstances`, `ec2:TerminateInstances`,
+  `ec2:DetachVolume`, `ec2:AttachVolume`, `ec2:DeleteVolume`, `ec2:ImportSnapshot`,
   `ec2:RegisterImage`, `ec2:DescribeImportSnapshotTasks`, `s3:PutObject`
 - An S3 bucket for staging the disk image
 
@@ -41,52 +42,39 @@ by `freeze`:
 scp /etc/immutable-ubuntu/image-metadata.yaml <build-host>:/tmp/image-metadata.yaml
 ```
 
-Then **stop the instance** — do not reboot it. The next step requires the root volume to be
-offline.
+## Step 2 — Detach the root EBS volume
+
+Stop the source instance and detach its root volume directly. There is no need to snapshot it
+first — the build host will read from the volume in place.
 
 ```bash
 aws ec2 stop-instances --instance-ids <source-instance-id>
 aws ec2 wait instance-stopped --instance-ids <source-instance-id>
-```
 
-## Step 2 — Snapshot the root EBS volume
-
-Find the root volume of the stopped source instance and create a snapshot:
-
-```bash
 ROOT_VOLUME=$(aws ec2 describe-instances \
   --instance-ids <source-instance-id> \
   --query 'Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName==`/dev/sda1`].Ebs.VolumeId' \
   --output text)
 
-SNAPSHOT_ID=$(aws ec2 create-snapshot \
-  --volume-id "$ROOT_VOLUME" \
-  --description "immutable-ubuntu source snapshot" \
-  --query 'SnapshotId' --output text)
-
-aws ec2 wait snapshot-completed --snapshot-ids "$SNAPSHOT_ID"
-echo "Snapshot ready: $SNAPSHOT_ID"
+aws ec2 detach-volume --volume-id "$ROOT_VOLUME"
+aws ec2 wait volume-available --volume-ids "$ROOT_VOLUME"
+echo "Root volume detached: $ROOT_VOLUME"
 ```
 
-## Step 3 — Attach the snapshot to the build host
-
-Create a volume from the snapshot and attach it to the build host:
+Once the volume is detached the source instance can be terminated:
 
 ```bash
-AZ=$(aws ec2 describe-instances \
-  --instance-ids <build-host-instance-id> \
-  --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' \
-  --output text)
+aws ec2 terminate-instances --instance-ids <source-instance-id>
+```
 
-VOLUME_ID=$(aws ec2 create-volume \
-  --snapshot-id "$SNAPSHOT_ID" \
-  --availability-zone "$AZ" \
-  --query 'VolumeId' --output text)
+## Step 3 — Attach the volume to the build host
 
-aws ec2 wait volume-available --volume-ids "$VOLUME_ID"
+Boot the build host **before** attaching the volume to ensure it boots from its own disk, then
+attach the detached root volume:
 
+```bash
 aws ec2 attach-volume \
-  --volume-id "$VOLUME_ID" \
+  --volume-id "$ROOT_VOLUME" \
   --instance-id <build-host-instance-id> \
   --device /dev/sdf
 ```
@@ -112,6 +100,14 @@ sudo immutable-ubuntu freeze \
 
 To make selected directories writable at runtime (e.g. `/var` and `/etc`), add
 `--volatile-dirs var,etc`.
+
+Once freeze is done, detach and delete the volume:
+
+```bash
+aws ec2 detach-volume --volume-id "$ROOT_VOLUME"
+aws ec2 wait volume-available --volume-ids "$ROOT_VOLUME"
+aws ec2 delete-volume --volume-id "$ROOT_VOLUME"
+```
 
 ## Step 5 — Upload the image to S3
 
@@ -143,12 +139,12 @@ while true; do
   sleep 30
 done
 
-AMI_SNAPSHOT=$(aws ec2 describe-import-snapshot-tasks \
+SNAPSHOT_ID=$(aws ec2 describe-import-snapshot-tasks \
   --import-task-ids "$IMPORT_TASK" \
   --query 'ImportSnapshotTasks[0].SnapshotTaskDetail.SnapshotId' \
   --output text)
 
-echo "Snapshot ID: $AMI_SNAPSHOT"
+echo "Snapshot ID: $SNAPSHOT_ID"
 ```
 
 ## Step 7 — Register the AMI
@@ -165,7 +161,7 @@ AMI_ID=$(aws ec2 register-image \
   --tpm-support v2.0 \
   --ena-support \
   --root-device-name /dev/sda1 \
-  --block-device-mappings "DeviceName=/dev/sda1,Ebs={SnapshotId=${AMI_SNAPSHOT},VolumeType=gp3}" \
+  --block-device-mappings "DeviceName=/dev/sda1,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3}" \
   --query 'ImageId' --output text)
 
 echo "AMI registered: $AMI_ID"
@@ -272,17 +268,11 @@ the dm-verity root hash) has changed since the image was built.
 
 ## Cleanup
 
-After a successful AMI registration you can release the temporary resources:
+After a successful AMI registration the staging S3 object can be removed:
 
 ```bash
-# Detach and delete the volume created from the source snapshot
-aws ec2 detach-volume --volume-id "$VOLUME_ID"
-aws ec2 wait volume-available --volume-ids "$VOLUME_ID"
-aws ec2 delete-volume --volume-id "$VOLUME_ID"
-
-# Delete the staging S3 object
 aws s3 rm "s3://${BUCKET}/${KEY}"
 ```
 
-The source EBS snapshot (`$SNAPSHOT_ID`) can be kept as a record or deleted once you have
-confirmed the AMI works correctly.
+The root EBS volume is deleted at the end of step 4. The snapshot (`$SNAPSHOT_ID`) can be kept
+as a record or deleted once you have confirmed the AMI works correctly.
