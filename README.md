@@ -72,5 +72,27 @@ On `freeze`, the tool performs the following steps:
 ## AWS Attestable AMIs
 
 See [docs/aws-attestable-ami.md](docs/aws-attestable-ami.md) for the complete end-to-end
-workflow: from a running EC2 instance through `prepare`, `freeze`, S3 upload, snapshot import,
-and AMI registration with NitroTPM and PCR reference measurements.
+workflow: from a running EC2 instance through `prepare`, `freeze`, snapshot, and AMI
+registration with NitroTPM and PCR reference measurements.
+
+The entire workflow is automated by `scripts/build-ami.sh`:
+
+```bash
+./scripts/build-ami.sh \
+  --immutable-ubuntu      ./immutable-ubuntu \
+  --nitro-tpm-pcr-compute ./nitro-tpm-pcr-compute \
+  --key-name              my-ec2-keypair \
+  --key-file              ~/.ssh/my-ec2-keypair.pem \
+  [--region               us-east-1] \
+  [--volatile-dirs        var,etc]
+```
+
+The script launches a source VM, runs `prepare`, detaches the root volume, attaches it to a
+dedicated build host, runs `freeze` writing directly to a blank EBS volume, snapshots that
+volume, and registers an attestable AMI (NitroTPM + UEFI boot mode). On completion it prints:
+
+```
+Snapshot ID : snap-...
+AMI ID      : ami-...
+PCR file    : /tmp/immutable-ubuntu-image-<pid>.img.pcr.json
+```
