@@ -7,13 +7,12 @@
 #     --nitro-tpm-pcr-compute ./nitro-tpm-pcr-compute \
 #     --key-name           my-ec2-keypair \
 #     --key-file           ~/.ssh/my-ec2-keypair.pem \
-#     --s3-bucket          my-ami-staging-bucket \
 #     [--region            us-east-1] \
 #     [--volatile-dirs     var,etc]
 #
 # The script prints two IDs at the end:
-#   Source Snapshot ID : snap-...   (EBS snapshot of the prepared source VM)
-#   AMI ID             : ami-...    (attestable AMI with NitroTPM + UEFI)
+#   Snapshot ID : snap-...   (EBS snapshot of the frozen disk image)
+#   AMI ID      : ami-...    (attestable AMI with NitroTPM + UEFI)
 
 set -euo pipefail
 
@@ -24,7 +23,6 @@ IMMUTABLE_UBUNTU_PATH=""
 NITRO_TPM_PATH=""
 KEY_NAME=""
 KEY_FILE=""
-S3_BUCKET=""
 REGION=""
 VOLATILE_DIRS=""
 
@@ -33,10 +31,10 @@ SG_ID=""
 SOURCE_INSTANCE=""
 BUILD_INSTANCE=""
 ROOT_VOLUME=""
+OUTPUT_VOLUME=""
 
 # Local temp files
 METADATA_LOCAL="/tmp/immutable-ubuntu-metadata-$$.yaml"
-IMAGE_LOCAL="/tmp/immutable-ubuntu-image-$$.img"
 PCR_LOCAL="/tmp/immutable-ubuntu-image-$$.img.pcr.json"
 
 # ---------------------------------------------------------------------------
@@ -54,6 +52,13 @@ cleanup() {
         aws ec2 delete-volume --volume-id "$ROOT_VOLUME" --region "$REGION" 2>/dev/null || true
     fi
 
+    if [[ -n "$OUTPUT_VOLUME" ]]; then
+        echo "Detaching and deleting output volume $OUTPUT_VOLUME..."
+        aws ec2 detach-volume --volume-id "$OUTPUT_VOLUME" --region "$REGION" 2>/dev/null || true
+        aws ec2 wait volume-available --volume-ids "$OUTPUT_VOLUME" --region "$REGION" 2>/dev/null || true
+        aws ec2 delete-volume --volume-id "$OUTPUT_VOLUME" --region "$REGION" 2>/dev/null || true
+    fi
+
     if [[ -n "$BUILD_INSTANCE" || -n "$SOURCE_INSTANCE" ]]; then
         local ids=""
         [[ -n "$SOURCE_INSTANCE" ]] && ids="$ids $SOURCE_INSTANCE"
@@ -67,10 +72,10 @@ cleanup() {
 
     if [[ -n "$SG_ID" ]]; then
         echo "Deleting security group $SG_ID..."
-        aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" 2>/dev/null || true
+        aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" &>/dev/null || true
     fi
 
-    rm -f "$METADATA_LOCAL" "$IMAGE_LOCAL" "$PCR_LOCAL"
+    #rm -f "$METADATA_LOCAL" "$PCR_LOCAL"
 
     if [[ $exit_code -ne 0 ]]; then
         echo "Script failed with exit code $exit_code."
@@ -94,7 +99,6 @@ Required:
   --nitro-tpm-pcr-compute PATH    Local path to the nitro-tpm-pcr-compute binary
   --key-name NAME                 EC2 key pair name (must already exist in your AWS account)
   --key-file PATH                 Local path to the matching private key (.pem)
-  --s3-bucket BUCKET              S3 bucket name for staging the disk image
 
 Optional:
   --region REGION                 AWS region (default: aws configure get region)
@@ -135,7 +139,6 @@ while [[ $# -gt 0 ]]; do
         --nitro-tpm-pcr-compute)   NITRO_TPM_PATH="$2";        shift 2 ;;
         --key-name)                KEY_NAME="$2";               shift 2 ;;
         --key-file)                KEY_FILE="$2";               shift 2 ;;
-        --s3-bucket)               S3_BUCKET="$2";              shift 2 ;;
         --region)                  REGION="$2";                 shift 2 ;;
         --volatile-dirs)           VOLATILE_DIRS="$2";          shift 2 ;;
         --help|-h)                 usage ;;
@@ -150,7 +153,6 @@ done
 [[ -n "$NITRO_TPM_PATH" ]]         || die "--nitro-tpm-pcr-compute is required."
 [[ -n "$KEY_NAME" ]]               || die "--key-name is required."
 [[ -n "$KEY_FILE" ]]               || die "--key-file is required."
-[[ -n "$S3_BUCKET" ]]              || die "--s3-bucket is required."
 
 [[ -f "$IMMUTABLE_UBUNTU_PATH" ]]  || die "File not found: $IMMUTABLE_UBUNTU_PATH"
 [[ -f "$NITRO_TPM_PATH" ]]         || die "File not found: $NITRO_TPM_PATH"
@@ -171,7 +173,6 @@ log "Region          : $REGION"
 log "immutable-ubuntu: $IMMUTABLE_UBUNTU_PATH"
 log "nitro-tpm       : $NITRO_TPM_PATH"
 log "Key pair        : $KEY_NAME"
-log "S3 bucket       : $S3_BUCKET"
 [[ -n "$VOLATILE_DIRS" ]] && log "Volatile dirs   : $VOLATILE_DIRS"
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,7 @@ SOURCE_INSTANCE=$(aws ec2 run-instances \
     --key-name "$KEY_NAME" \
     --subnet-id "$DEFAULT_SUBNET" \
     --security-group-ids "$SG_ID" \
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeType=gp3,Iops=4000,Throughput=1000}' \
     --region "$REGION" \
     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=immutable-ubuntu-source}]' \
     --query 'Instances[0].InstanceId' \
@@ -299,7 +301,7 @@ aws ec2 terminate-instances --instance-ids "$SOURCE_INSTANCE" --region "$REGION"
 SOURCE_INSTANCE=""
 
 # ---------------------------------------------------------------------------
-# Step 6 — Launch build host (boot BEFORE attaching snapshot volume)
+# Step 6 — Launch build host (boot BEFORE attaching any extra volumes)
 # ---------------------------------------------------------------------------
 log "Launching build host (m5.large, same AZ: $AZ)..."
 BUILD_INSTANCE=$(aws ec2 run-instances \
@@ -325,7 +327,7 @@ BUILD_IP=$(aws ec2 describe-instances \
 log "Build host IP   : $BUILD_IP"
 
 # Wait for SSH to be ready — this ensures the instance has fully booted before
-# we attach the snapshot volume (booting from the wrong disk is prevented this way).
+# we attach any volumes (booting from the wrong disk is prevented this way).
 wait_for_ssh "$BUILD_IP" "$KEY_FILE"
 
 log "Installing build dependencies on build host..."
@@ -333,7 +335,7 @@ ssh "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}" \
     "sudo apt-get update -qq && sudo apt-get install -y -qq gdisk cryptsetup-bin systemd-ukify systemd-boot-efi dosfstools"
 
 # ---------------------------------------------------------------------------
-# Step 7 — Attach root volume to build host
+# Step 7 — Attach source (root) volume and create + attach blank output volume
 # ---------------------------------------------------------------------------
 log "Attaching root volume to build host as /dev/sdf..."
 aws ec2 attach-volume \
@@ -342,6 +344,38 @@ aws ec2 attach-volume \
     --device /dev/sdf \
     --region "$REGION" >/dev/null
 
+log "Querying source volume size..."
+SOURCE_SIZE_GIB=$(aws ec2 describe-volumes \
+    --volume-ids "$ROOT_VOLUME" \
+    --region "$REGION" \
+    --query 'Volumes[0].Size' \
+    --output text)
+OUTPUT_SIZE_GIB=$(( SOURCE_SIZE_GIB + 2 ))   # +2 GiB headroom for ESP and verity
+log "Output volume size: ${OUTPUT_SIZE_GIB} GiB (source ${SOURCE_SIZE_GIB} GiB + 2 GiB)"
+
+log "Creating blank output volume (${OUTPUT_SIZE_GIB} GiB)..."
+OUTPUT_VOLUME=$(aws ec2 create-volume \
+    --size "$OUTPUT_SIZE_GIB" \
+    --availability-zone "$AZ" \
+    --volume-type gp3 \
+    --iops 4000 \
+    --throughput 1000 \
+    --region "$REGION" \
+    --tag-specifications 'ResourceType=volume,Tags=[{Key=Name,Value=immutable-ubuntu-output}]' \
+    --query 'VolumeId' \
+    --output text)
+log "Output volume   : $OUTPUT_VOLUME"
+
+aws ec2 wait volume-available --volume-ids "$OUTPUT_VOLUME" --region "$REGION"
+
+log "Attaching output volume to build host as /dev/sdg..."
+aws ec2 attach-volume \
+    --volume-id "$OUTPUT_VOLUME" \
+    --instance-id "$BUILD_INSTANCE" \
+    --device /dev/sdg \
+    --region "$REGION" >/dev/null
+
+# Wait for udev to publish the source volume's PARTUUID symlinks (needed by freeze).
 log "Waiting for udev to populate /dev/disk/by-partuuid/ on build host..."
 for attempt in $(seq 1 30); do
     COUNT=$(ssh "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}" \
@@ -356,6 +390,29 @@ for attempt in $(seq 1 30); do
     sleep 5
 done
 
+# Resolve the output volume's block device path via /dev/disk/by-id/.
+# On NVMe instances (m5.large) EBS volumes appear as:
+#   /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_<vol-id-without-dashes>
+OUTPUT_VOLUME_CLEAN="${OUTPUT_VOLUME//-/}"   # vol-0abc... -> vol0abc...
+OUTPUT_BY_ID="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${OUTPUT_VOLUME_CLEAN}"
+
+log "Waiting for output volume device to appear on build host..."
+for attempt in $(seq 1 30); do
+    # shellcheck disable=SC2029  # OUTPUT_BY_ID is intentionally expanded client-side
+    if ssh "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}" \
+           "test -L '${OUTPUT_BY_ID}'" 2>/dev/null; then
+        break
+    fi
+    if (( attempt == 30 )); then
+        die "Timed out waiting for output volume device on build host."
+    fi
+    sleep 5
+done
+
+# shellcheck disable=SC2029  # OUTPUT_BY_ID is intentionally expanded client-side
+OUTPUT_DEV=$(ssh "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}" "readlink -f '${OUTPUT_BY_ID}'")
+log "Output device   : $OUTPUT_DEV"
+
 # ---------------------------------------------------------------------------
 # Step 8 — Upload binaries and run freeze on build host
 # ---------------------------------------------------------------------------
@@ -364,85 +421,61 @@ scp "${SSH_OPTS[@]}" "$IMMUTABLE_UBUNTU_PATH" "ubuntu@${BUILD_IP}:/tmp/immutable
 scp "${SSH_OPTS[@]}" "$NITRO_TPM_PATH"        "ubuntu@${BUILD_IP}:/tmp/nitro-tpm-pcr-compute"
 scp "${SSH_OPTS[@]}" "$METADATA_LOCAL"         "ubuntu@${BUILD_IP}:/tmp/image-metadata.yaml"
 
-log "Running 'immutable-ubuntu freeze' on build host..."
+log "Running 'immutable-ubuntu freeze' on build host (output: $OUTPUT_DEV)..."
 # shellcheck disable=SC2029
 ssh "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}" \
     "chmod +x /tmp/immutable-ubuntu /tmp/nitro-tpm-pcr-compute
      sudo PATH=/tmp:\$PATH /tmp/immutable-ubuntu freeze \
        --config /tmp/image-metadata.yaml \
-       --output /tmp/immutable.img ${VOLATILE_DIRS_FLAG}"
+       --output ${OUTPUT_DEV} ${VOLATILE_DIRS_FLAG}"
 
 # ---------------------------------------------------------------------------
-# Step 9 — Copy image back and clean up build host
+# Step 9 — Copy PCR measurements back and detach volumes
 # ---------------------------------------------------------------------------
-log "Copying disk image from build host (this may take a while)..."
-scp "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}:/tmp/immutable.img" "$IMAGE_LOCAL"
-
 log "Copying PCR measurements from build host (if present)..."
-scp "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}:/tmp/immutable.img.pcr.json" "$PCR_LOCAL" 2>/dev/null \
+# freeze writes PCR output to <output-path>.pcr.json
+scp "${SSH_OPTS[@]}" "ubuntu@${BUILD_IP}:${OUTPUT_DEV}.pcr.json" "$PCR_LOCAL" 2>/dev/null \
     || log "No PCR measurements file found — skipping."
 
-log "Detaching and deleting root volume..."
-aws ec2 detach-volume --volume-id "$ROOT_VOLUME" --region "$REGION" >/dev/null
-aws ec2 wait volume-available --volume-ids "$ROOT_VOLUME" --region "$REGION"
+log "Detaching root volume and output volume from build host..."
+aws ec2 detach-volume --volume-id "$ROOT_VOLUME"  --region "$REGION" >/dev/null
+aws ec2 detach-volume --volume-id "$OUTPUT_VOLUME" --region "$REGION" >/dev/null
+aws ec2 wait volume-available --volume-ids "$ROOT_VOLUME"  --region "$REGION"
+aws ec2 wait volume-available --volume-ids "$OUTPUT_VOLUME" --region "$REGION"
+
+log "Deleting root volume..."
 aws ec2 delete-volume --volume-id "$ROOT_VOLUME" --region "$REGION" >/dev/null
 ROOT_VOLUME=""  # prevent cleanup trap from double-deleting
 
 log "Terminating build host..."
 aws ec2 terminate-instances --instance-ids "$BUILD_INSTANCE" --region "$REGION" >/dev/null
-aws ec2 wait instance-terminated --instance-ids "$BUILD_INSTANCE" --region "$REGION"
 BUILD_INSTANCE=""
 
 # ---------------------------------------------------------------------------
-# Step 10 — Upload disk image to S3
+# Step 10 — Snapshot the output volume directly
 # ---------------------------------------------------------------------------
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-S3_KEY="immutable-ubuntu/${TIMESTAMP}/immutable.img"
 
-log "Uploading disk image to s3://${S3_BUCKET}/${S3_KEY}..."
-aws s3 cp "$IMAGE_LOCAL" "s3://${S3_BUCKET}/${S3_KEY}" --region "$REGION"
-
-# ---------------------------------------------------------------------------
-# Step 11 — Import image as EBS snapshot
-# ---------------------------------------------------------------------------
-log "Importing disk image as EBS snapshot..."
-IMPORT_TASK=$(aws ec2 import-snapshot \
+log "Creating snapshot from output volume..."
+SNAPSHOT_ID=$(aws ec2 create-snapshot \
+    --volume-id "$OUTPUT_VOLUME" \
     --description "immutable-ubuntu ${TIMESTAMP}" \
-    --disk-container "Format=RAW,UserBucket={S3Bucket=${S3_BUCKET},S3Key=${S3_KEY}}" \
     --region "$REGION" \
-    --query 'ImportTaskId' \
+    --tag-specifications "ResourceType=snapshot,Tags=[{Key=Name,Value=immutable-ubuntu-${TIMESTAMP}}]" \
+    --query 'SnapshotId' \
     --output text)
-log "Import task     : $IMPORT_TASK"
+log "Snapshot        : $SNAPSHOT_ID"
 
-log "Polling import task (this may take several minutes)..."
-while true; do
-    TASK_JSON=$(aws ec2 describe-import-snapshot-tasks \
-        --import-task-ids "$IMPORT_TASK" \
-        --region "$REGION" \
-        --query 'ImportSnapshotTasks[0].SnapshotTaskDetail' \
-        --output json)
-    STATUS=$(echo "$TASK_JSON" | grep -o '"Status": *"[^"]*"' | awk -F'"' '{print $4}')
-    PROGRESS=$(echo "$TASK_JSON" | grep -o '"Progress": *"[^"]*"' | awk -F'"' '{print $4}' || true)
-    log "Import status   : $STATUS ${PROGRESS:+(${PROGRESS}%)}"
-    [[ "$STATUS" == "completed" ]] && break
-    [[ "$STATUS" == "deleted" || "$STATUS" == "deleting" ]] \
-        && die "Snapshot import task failed (status: $STATUS)."
-    sleep 30
-done
+log "Waiting for snapshot to complete (this may take a few minutes)..."
+aws ec2 wait snapshot-completed --snapshot-ids "$SNAPSHOT_ID" --region "$REGION"
+log "Snapshot completed."
 
-AMI_SNAPSHOT=$(aws ec2 describe-import-snapshot-tasks \
-    --import-task-ids "$IMPORT_TASK" \
-    --region "$REGION" \
-    --query 'ImportSnapshotTasks[0].SnapshotTaskDetail.SnapshotId' \
-    --output text)
-log "Imported snapshot: $AMI_SNAPSHOT"
-
-# Clean up S3 staging object
-log "Removing S3 staging object..."
-aws s3 rm "s3://${S3_BUCKET}/${S3_KEY}" --region "$REGION" >/dev/null
+log "Deleting output volume..."
+aws ec2 delete-volume --volume-id "$OUTPUT_VOLUME" --region "$REGION" >/dev/null
+OUTPUT_VOLUME=""  # prevent cleanup trap from double-deleting
 
 # ---------------------------------------------------------------------------
-# Step 12 — Register AMI
+# Step 11 — Register AMI
 # ---------------------------------------------------------------------------
 log "Registering AMI with NitroTPM and UEFI boot mode..."
 AMI_ID=$(aws ec2 register-image \
@@ -453,26 +486,17 @@ AMI_ID=$(aws ec2 register-image \
     --tpm-support v2.0 \
     --ena-support \
     --root-device-name /dev/sda1 \
-    --block-device-mappings "DeviceName=/dev/sda1,Ebs={SnapshotId=${AMI_SNAPSHOT},VolumeType=gp3}" \
+    --block-device-mappings "DeviceName=/dev/sda1,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3}" \
     --region "$REGION" \
     --query 'ImageId' \
     --output text)
 log "AMI registered  : $AMI_ID"
 
 # ---------------------------------------------------------------------------
-# Step 13 — Store PCR measurements alongside AMI metadata
-# ---------------------------------------------------------------------------
-if [[ -f "$PCR_LOCAL" ]]; then
-    PCR_S3_KEY="immutable-ubuntu/${AMI_ID}.pcr.json"
-    log "Storing PCR measurements at s3://${S3_BUCKET}/${PCR_S3_KEY}..."
-    aws s3 cp "$PCR_LOCAL" "s3://${S3_BUCKET}/${PCR_S3_KEY}" --region "$REGION"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 14 — Delete temp security group
+# Step 12 — Delete temp security group
 # ---------------------------------------------------------------------------
 log "Deleting temporary security group $SG_ID..."
-aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" 2>/dev/null || true
+aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" &>/dev/null || true
 SG_ID=""
 
 # ---------------------------------------------------------------------------
@@ -482,6 +506,7 @@ echo ""
 echo "========================================="
 echo " Build complete"
 echo "========================================="
-echo " Snapshot ID : $AMI_SNAPSHOT"
+echo " Snapshot ID : $SNAPSHOT_ID"
 echo " AMI ID      : $AMI_ID"
+[[ -f "$PCR_LOCAL" ]] && echo " PCR file    : $PCR_LOCAL"
 echo "========================================="

@@ -17,11 +17,18 @@ type Partition struct {
 }
 
 // Assemble creates a new GPT disk image at output containing the given partitions in order.
-// On any error, the partial output file is removed before returning.
+// output may be a regular file path (created fresh) or a block device (written in place).
+// On any error involving a regular file, the partial output is removed before returning.
 func Assemble(output string, partitions []Partition) error {
+	// Detect whether output is a block device so we can adjust behaviour below.
+	isBlock := false
+	if info, err := os.Stat(output); err == nil {
+		isBlock = info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0
+	}
+
 	success := false
 	defer func() {
-		if !success {
+		if !success && !isBlock {
 			os.Remove(output)
 		}
 	}()
@@ -39,9 +46,21 @@ func Assemble(output string, partitions []Partition) error {
 		totalMiB += mib
 	}
 
-	// Create sparse output file.
-	if err := runCmd("truncate", fmt.Sprintf("--size=%dM", totalMiB), output); err != nil {
-		return fmt.Errorf("create image file: %w", err)
+	if isBlock {
+		// Validate that the block device is large enough; truncate is not applicable.
+		devBytes, err := deviceSize(output)
+		if err != nil {
+			return fmt.Errorf("get block device size: %w", err)
+		}
+		if needed := totalMiB << 20; devBytes < needed {
+			return fmt.Errorf("block device %s too small: need %d MiB, have %d MiB",
+				output, totalMiB, devBytes>>20)
+		}
+	} else {
+		// Create sparse output file sized to hold all partitions.
+		if err := runCmd("truncate", fmt.Sprintf("--size=%dM", totalMiB), output); err != nil {
+			return fmt.Errorf("create image file: %w", err)
+		}
 	}
 
 	// Initialise GPT.
@@ -74,8 +93,9 @@ func Assemble(output string, partitions []Partition) error {
 		if err := runCmd("dd",
 			"if="+p.Source,
 			"of="+output,
-			"bs=512",
-			fmt.Sprintf("seek=%d", sector),
+			"bs=4M",
+			fmt.Sprintf("seek=%d", sector*512),
+			"oflag=seek_bytes",
 			"conv=notrunc",
 			"iflag=fullblock",
 		); err != nil {

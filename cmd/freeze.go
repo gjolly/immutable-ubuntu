@@ -36,8 +36,13 @@ func init() {
 }
 
 func runFreeze(cmd *cobra.Command, args []string) error {
-	if _, err := os.Stat(freezeOutput); err == nil {
-		return fmt.Errorf("freeze: output file already exists: %s", freezeOutput)
+	if info, err := os.Stat(freezeOutput); err == nil {
+		isBlock := info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0
+		if !isBlock {
+			return fmt.Errorf("freeze: output file already exists: %s", freezeOutput)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("freeze: stat output: %w", err)
 	}
 
 	fmt.Printf("Loading metadata from %s...\n", freezeConfig)

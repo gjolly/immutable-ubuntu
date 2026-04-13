@@ -29,18 +29,45 @@ func Build(cfg UKIConfig) error {
 	return nil
 }
 
-// InstallToDisk loop-mounts diskImage, mounts the ESP (partition 1), places the UKI at
-// EFI/BOOT/BOOTX64.EFI, then unmounts and detaches the loop device.
+// InstallToDisk mounts the ESP of diskImage, places the UKI at EFI/BOOT/BOOTX64.EFI,
+// then unmounts.
+//
+// For regular image files the ESP is reached via a loop device. For block devices
+// the kernel partition table is refreshed with partprobe and the partition node is
+// used directly, avoiding a needless extra layer of indirection.
+//
+// In both cases the ESP is located by its partition type GUID rather than by number.
 func InstallToDisk(ukiPath, diskImage string) error {
-	out, err := runCmdOutput("losetup", "--find", "--partscan", "--show", diskImage)
+	info, err := os.Stat(diskImage)
 	if err != nil {
-		return fmt.Errorf("attach disk image: %w", err)
+		return fmt.Errorf("stat disk image: %w", err)
 	}
-	loopDev := strings.TrimSpace(string(out))
-	defer func() { _ = runCmd("losetup", "-d", loopDev) }()
+	isBlock := info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0
 
-	// Give udev a moment to create partition device nodes.
+	var topDev string
+	if isBlock {
+		// Refresh the kernel's in-memory partition table after sgdisk/dd have written
+		// to the device, then wait for udev to create the partition device nodes.
+		if err := runCmd("partprobe", diskImage); err != nil {
+			return fmt.Errorf("refresh partition table: %w", err)
+		}
+		topDev = diskImage
+	} else {
+		out, err := runCmdOutput("losetup", "--find", "--partscan", "--show", diskImage)
+		if err != nil {
+			return fmt.Errorf("attach disk image: %w", err)
+		}
+		topDev = strings.TrimSpace(string(out))
+		defer func() { _ = runCmd("losetup", "-d", topDev) }()
+	}
+
+	// Wait for udev to create partition device nodes regardless of path taken above.
 	_ = runCmd("udevadm", "settle", "--timeout=5")
+
+	espDev, err := findESP(topDev)
+	if err != nil {
+		return err
+	}
 
 	mountDir, err := os.MkdirTemp("", "immutable-ubuntu-esp-*")
 	if err != nil {
@@ -48,7 +75,6 @@ func InstallToDisk(ukiPath, diskImage string) error {
 	}
 	defer os.RemoveAll(mountDir)
 
-	espDev := loopDev + "p1"
 	if err := runCmd("mount", espDev, mountDir); err != nil {
 		return fmt.Errorf("mount ESP: %w", err)
 	}
@@ -65,6 +91,24 @@ func InstallToDisk(ukiPath, diskImage string) error {
 	}
 
 	return nil
+}
+
+// findESP returns the block device path of the EFI System Partition on device by
+// scanning partition types with lsblk.
+func findESP(device string) (string, error) {
+	const espTypeGUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+	out, err := runCmdOutput("lsblk", "--noheadings", "--raw", "--output", "NAME,PARTTYPE", device)
+	if err != nil {
+		return "", fmt.Errorf("lsblk %s: %w", device, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.EqualFold(fields[1], espTypeGUID) {
+			return "/dev/" + fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("no EFI System Partition found on %s", device)
 }
 
 // FindKernel mounts partitionImage read-only, locates vmlinuz and initrd.img, copies them
